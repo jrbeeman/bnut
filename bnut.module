@@ -1,0 +1,258 @@
+<?php
+
+
+/**
+ * Implementation of hook_menu().
+ */
+function bnut_menu($may_cache) {
+  $items = array();
+
+  if ($may_cache) {
+    $items[] = array(
+      'path' => 'admin/content/bnut',
+      'title' => t('Bulk node update tool'),
+      'callback' => 'drupal_get_form',
+      'callback arguments' => 'bnut_admin_settings',
+      'access' => user_access('administer nodes'),
+      'type' => MENU_NORMAL_ITEM
+    );
+    $items[] = array(
+      'path' => 'admin/content/bnut/rebuild/nat',
+      'title' => t('BNUT NAT'),
+      'description' => t('Rebuild Node Access Table'),
+      'callback' => 'bnut_rebuild_nat',
+      'access' => user_access('administer nodes'),
+      'type' => MENU_CALLBACK
+    );
+    $items[] = array(
+      'path' => 'admin/content/bnut/rebuild/ncs',
+      'title' => t('BNUT NCS'),
+      'description' => t('Rebuild Node Comment Statistics Table'),
+      'callback' => 'bnut_rebuild_ncs',
+      'access' => user_access('administer nodes'),
+      'type' => MENU_CALLBACK
+    );
+  }
+
+  return $items;
+}
+
+
+/**
+ * Menu callback
+ */
+function bnut_admin_settings() {
+  drupal_add_js(bnut_js_settings(), 'setting');
+  drupal_add_js(drupal_get_path('module', 'bnut') . '/bnut.js');
+  drupal_add_css(drupal_get_path('module', 'bnut') . '/bnut.css');
+  
+  $options = drupal_map_assoc(array(50, 100, 250, 500, 1000, 2500, 5000));
+  
+  $form['access'] = array('#type' => 'fieldset', '#title' => t('Node access table'));
+  $form['access']['info'] = array(
+    '#value' => '<p>'. t('Rebuilding may take some time if there is a lot of content or complex permission settings. After rebuilding has completed posts will automatically use the new permissions.') .'</p>',
+  );
+  $form['access']['bnut_num_per_step_nat'] = array(
+    '#type' => 'select',
+    '#title' => t('Nodes to rebuild per step'),
+    '#default_value' => variable_get('bnut_num_per_step_nat', 500),
+    '#options' => $options,
+  );
+  $form['access']['rebuild_nat'] = array(
+    '#type' => 'submit', 
+    '#value' => t('Rebuild permissions'),
+    '#attributes' => array(
+      'onclick' => 'Drupal.bnutRebuildNat(0); return false;',
+    ),
+  );
+  
+  $form['ncs'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Node comment statistics table')
+  );
+  $form['ncs']['info'] = array(
+    '#value' => '<p>'. t('Rebuilding may take some time if there are a lot of comments. After rebuilding has completed posts will automatically use the new statistics.') .'</p>',
+  );
+  $form['ncs']['bnut_num_per_step_ncs'] = array(
+    '#type' => 'select',
+    '#title' => t('Nodes to rebuild per step'),
+    '#default_value' => variable_get('bnut_num_per_step_ncs', 500),
+    '#options' => $options,
+  );
+  $form['ncs']['rebuild_ncs'] = array(
+    '#type' => 'submit',
+    '#value' => t('Rebuild statistics'),
+    '#attributes' => array(
+      'onclick' => 'Drupal.bnutRebuildNcs(0); return false;',
+    ),
+  );
+  
+  return system_settings_form($form);
+}
+
+
+function bnut_js_settings() {
+  global $base_url;
+  return array(
+    'bnut' => array(
+      'loadingIndicatorPath' => drupal_get_path('module', 'bnut') . '/loading_indicator.gif',
+      'natPath' => $base_url . '/admin/content/bnut/rebuild/nat/js',
+      'ncsPath' => $base_url . '/admin/content/bnut/rebuild/ncs/js',
+    ),
+  );
+}
+
+
+/**
+ * Form validate callback.
+ */
+function bnut_admin_settings_validate($form_id, $form_values) {
+  if ($form_values['op'] == t('Rebuild permissions')) {
+    variable_set('bnut_num_per_step_nat', $form_values['bnut_num_per_step_nat']);
+    drupal_goto('admin/content/bnut/rebuild/nat');
+  }
+  if ($form_values['op'] == t('Rebuild statistics')) {
+    variable_set('bnut_num_per_step_ncs', $form_values['bnut_num_per_step_ncs']);
+    drupal_goto('admin/content/bnut/rebuild/ncs');
+  }
+}
+
+
+function bnut_rebuild_nat($output = 'html') {
+  $step = $_REQUEST['step'];
+  $continue = bnut_nat_step($step);
+  if ($continue) {
+    print bnut_step_output('nat', $output, $step, $continue);
+    exit();
+  }
+  else {
+    print 'done';
+  }
+}
+
+
+function bnut_rebuild_ncs($output = 'html') {
+  $step = $_REQUEST['step'];
+  $continue = bnut_ncs_step($step);
+  if ($continue) {
+    print bnut_step_output('ncs', $output, $step, $continue);
+    exit();
+  }
+  else {
+    print 'done';
+  }
+}
+
+
+function bnut_nat_step($step) {
+  $limit = variable_get('bnut_num_per_step_nat', 500);
+  $start = $step * $limit;
+  $steps_total = floor(db_result(db_query("SELECT COUNT(*) FROM {node}")) / $limit);
+  
+  if ($step > $steps_total) {
+    return false;
+  }
+
+  if ($step == 0) {
+    db_query("DELETE FROM {node_access}");
+  }
+  
+  if (count(module_implements('node_grants'))) {
+    // If not in 'safe mode', increase the maximum execution time:
+    if (!ini_get('safe_mode')) {
+      set_time_limit(240);
+    }
+    $result = db_query("SELECT nid FROM {node} ORDER BY nid LIMIT %d,%d", $start, $limit);
+    while ($node = db_fetch_object($result)) {
+      $loaded_node = node_load($node->nid, NULL, TRUE);
+      // To preserve database integrity, only aquire grants if the node
+      // loads successfully.
+      if (!empty($loaded_node)) {
+        node_access_acquire_grants($loaded_node);
+      }
+    }
+  }
+  else {
+    // not using any node_access modules. add the default grant.
+    db_query("INSERT INTO {node_access} VALUES (0, 0, 'all', 1, 0, 0)");
+  }
+  cache_clear_all();
+  return $steps_total;
+}
+
+
+function bnut_ncs_step($step) {
+  $limit = variable_get('bnut_num_per_step_ncs', 500);
+  $start = $step * $limit;
+  $steps_total = floor(db_result(db_query("SELECT COUNT(*) FROM {node}")) / $limit);
+  
+  if ($step > $steps_total) {
+    return false;
+  }
+
+  if ($step == 0) {
+    db_query("DELETE FROM {node_comment_statistics}");
+  }
+  
+  if (!ini_get('safe_mode')) {
+    set_time_limit(240);
+  }
+  
+  $result = db_query("SELECT nid FROM {node} ORDER BY nid LIMIT %d,%d", $start, $limit);
+  while ($node = db_fetch_object($result)) {
+    $sql = "INSERT INTO {node_comment_statistics} 
+      (nid, last_comment_timestamp, last_comment_name, last_comment_uid, comment_count)
+      (SELECT nid, timestamp, name, uid, 
+        (SELECT COUNT(*) FROM {comments} WHERE nid = %d AND status = %d) AS comment_count 
+        FROM {comments} c
+        WHERE nid = %d AND status = %d AND
+        c.timestamp = (SELECT MAX(timestamp) FROM {comments} WHERE nid = %d)
+        GROUP BY nid
+      )";
+    db_query($sql, $node->nid, COMMENT_PUBLISHED, $node->nid, COMMENT_PUBLISHED, $node->nid);
+  }
+  
+  cache_clear_all();
+  return $steps_total;
+}
+
+
+function bnut_step_output($type, $output = 'html', $step, $steps_total) {
+  if ($output == 'js') {
+    return "Step $step of $steps_total";
+  }
+  if ($output == 'html') {
+    global $base_url;
+    $path = $base_url . '/admin/content/bnut/rebuild/' . $type;
+    $image = theme('image', drupal_get_path('module', 'bnut') . '/loading_indicator.gif');
+    return "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\"
+      \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">
+    <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\" lang=\"en\">
+    <head>
+      <meta http-equiv=\"Content-type\" content=\"text/html; charset=utf-8\">
+      <title>Drupal BNUT Update ($type)</title>
+      <script type=\"text/javascript\">
+      function bnutNext() {
+        window.location = '$path?step=$step';
+      }
+      </script>
+      <style type=\"text/css\">
+        body { background:#cccccc; }
+        #status { width:200px; padding:1em; margin:1em auto; text-align:center;
+          background:#ffffff; border:1px solid #333333; }
+      </style>
+    </head>
+    <body onload=\"bnutNext()\">
+      <div id=\"status\">
+        <p>
+          <strong>Please wait... rebuilding $type table</strong><br/>
+          $image <br/>
+          Finished step $step of $steps_total. <br/>
+          <noscript>
+            <a href=\"$path?step=$step\">Next</a>
+          </noscript>
+        </p>
+      </div>
+    </body>";
+  }
+}

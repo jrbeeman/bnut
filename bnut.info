@@ -1,0 +1,2 @@
+name = Bulk Node Update Tool
+description = "Perforum bulk node updates, such as rebuilding the node access or node comment statistics tables through a semi-automated batch"

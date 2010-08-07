@@ -1,0 +1,11 @@
+.bnut-status {
+  width:200px;
+  margin:1em auto;
+  padding:1em;
+  border:1px solid;
+}
+
+.bnut-status p {
+  margin:0;
+  text-align:center;
+}
